@@ -93,6 +93,7 @@ if TYPE_CHECKING:
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
     VLLM_INKLING2_SM8X_LL_GEMM: bool = False
+    VLLM_INKLING2_SM8X_FUSED_ROUTING: bool = False
     VLLM_TRITON_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
@@ -663,6 +664,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # the LM head at M <= 16 on the low-M Triton kernels instead of cuBLAS.
     "VLLM_INKLING2_SM8X_LL_GEMM": lambda: bool(
         int(os.getenv("VLLM_INKLING2_SM8X_LL_GEMM", "0"))
+    ),
+    # Inkling 2 on SM8x: run the MoE router GEMM, top-k and expert row
+    # alignment in one launch for up to 32 tokens.
+    "VLLM_INKLING2_SM8X_FUSED_ROUTING": lambda: bool(
+        int(os.getenv("VLLM_INKLING2_SM8X_FUSED_ROUTING", "0"))
     ),
     "VLLM_REPLICATE_EMBED": lambda: (
         os.getenv("VLLM_REPLICATE_EMBED", "0").strip().lower() in ("1", "true")

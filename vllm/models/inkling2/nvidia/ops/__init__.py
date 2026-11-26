@@ -3,7 +3,10 @@
 import functools
 
 # The SM8x decode kernels and their switches in `vllm/envs.py`.
-_SM8X_KERNELS = {"ll_gemm": "VLLM_INKLING2_SM8X_LL_GEMM"}
+_SM8X_KERNELS = {
+    "ll_gemm": "VLLM_INKLING2_SM8X_LL_GEMM",
+    "fused_routing": "VLLM_INKLING2_SM8X_FUSED_ROUTING",
+}
 
 
 @functools.cache
