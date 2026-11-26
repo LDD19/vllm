@@ -304,7 +304,7 @@ def test_attn_res_without_norm_returns_fp32_mix(num_stack, with_addend, tokens):
     torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-4)
 
 
-@pytest.mark.parametrize("tokens", [1, 300])
+@pytest.mark.parametrize("tokens", [1, 8, 300])
 def test_loop_blend_matches_per_stream_controllers(tokens):
     """The stream-batched controllers (shared `dest` and norm weight, as a
     local layer's q/k/v) equal each stream's reference controller followed by

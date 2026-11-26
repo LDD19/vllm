@@ -210,7 +210,8 @@ def _sm86_or_sm89() -> bool:
 
 @functools.cache
 def use_low_m_projections() -> bool:
-    """Whether the attention projections and the LM head take these kernels:
+    """Whether the attention projections, the LM head and the loop blend's
+    controllers take these kernels:
     SM12x, and SM8x (`use_sm8x_kernels`)."""
     return current_platform.is_device_capability_family(120) or use_sm8x_kernels(
         "ll_gemm"
