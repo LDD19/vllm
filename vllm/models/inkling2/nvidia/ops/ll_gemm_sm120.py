@@ -13,12 +13,18 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import current_stream
 
+from . import use_pdl, use_sm8x_kernels
+from .pdl import gdc_launch_dependents, gdc_wait
+
 MAX_M = 16
 _MP = 16
 _MAX_TILES = 4096
 
 
-@triton.jit
+# The LM head runs outside CUDA graphs on the sampled rows, so M takes values
+# the warmup does not; SM8x compiles one kernel for every M. SM12x keeps its
+# specialization on M.
+@triton.jit(do_not_specialize=() if use_pdl() else ("M",))
 def _ll_gemm_kernel(
     X,
     W,
@@ -45,7 +51,7 @@ def _ll_gemm_kernel(
     `s`. With `SPLIT > 1` it writes fp32 partials to `P` `[SPLIT, B, MP, N]`;
     the last of the tile's programs to finish (counted in `C`, reset to 0
     after) sums them in split order, so results are deterministic."""
-    tl.extra.cuda.gdc_wait()
+    gdc_wait()
     pid_n = tl.program_id(0)
     b = tl.program_id(1)
     s = tl.program_id(2)
@@ -90,7 +96,7 @@ def _ll_gemm_kernel(
             acc.to(Y.dtype.element_ty),
             (rows[:, None] < M) & (cols[None, :] < N),
         )
-    tl.extra.cuda.gdc_launch_dependents()
+    gdc_launch_dependents()
 
 
 @triton.jit
@@ -128,7 +134,7 @@ def _qkv_bmm_kernel(
     """Columns `[0, S1)` of `Y` are `XQ @ W.T`, `[S1, S2)` `XK` and `[S2, N)`
     `XV`. A tile spanning a boundary runs both inputs' dots and picks per
     column (the second input's loads hit L2)."""
-    tl.extra.cuda.gdc_wait()
+    gdc_wait()
     n0 = tl.program_id(0) * BN
     n1 = tl.minimum(n0 + BN, N) - 1
     b_lo = (n0 >= S1).to(tl.int32) + (n0 >= S2).to(tl.int32)
@@ -159,7 +165,7 @@ def _qkv_bmm_kernel(
         acc.to(Y.dtype.element_ty),
         (rows[:, None] < M) & (cols[None, :] < N),
     )
-    tl.extra.cuda.gdc_launch_dependents()
+    gdc_launch_dependents()
 
 
 class _Config(NamedTuple):
@@ -186,7 +192,29 @@ def _config(nb: int, n: int, k: int) -> _Config:
             split = triton.cdiv(k_tiles, tiles_per_split)
             return _Config(bn, bk, split, tiles_per_split * bk, 4, 4)
     bk = min(256, max(16, triton.next_power_of_2(k)))
+    if _sm86_or_sm89():
+        # Measured on an RTX 3080 (sm86): 128-wide K tiles read the unsplit
+        # grids up to 7% faster (Inkling's o_proj), never slower.
+        bk = min(bk, 128)
     return _Config(32, bk, 1, triton.cdiv(k, bk) * bk, 4, 3)
+
+
+@functools.cache
+def _sm86_or_sm89() -> bool:
+    """SM86/SM89: ~100 KB of shared memory per SM, unlike SM80 and SM87
+    (164 KB)."""
+    return current_platform.is_device_capability(
+        86
+    ) or current_platform.is_device_capability(89)
+
+
+@functools.cache
+def use_low_m_projections() -> bool:
+    """Whether the attention projections and the LM head take these kernels:
+    SM12x, and SM8x (`use_sm8x_kernels`)."""
+    return current_platform.is_device_capability_family(120) or use_sm8x_kernels(
+        "ll_gemm"
+    )
 
 
 @functools.cache
@@ -237,7 +265,7 @@ def _ll_gemm(
         MP=_MP,
         num_warps=cfg.num_warps,
         num_stages=cfg.num_stages,
-        launch_pdl=True,
+        launch_pdl=use_pdl(),
     )
 
 
@@ -252,7 +280,7 @@ def use_qkv_bmm(
         and x_q.shape == x_k.shape == x_v.shape
         and x_q.dtype == x_k.dtype == x_v.dtype == w.dtype == torch.bfloat16
         and x_q.stride(1) == x_k.stride(1) == x_v.stride(1) == w.stride(1) == 1
-        and current_platform.is_device_capability_family(120)
+        and use_low_m_projections()
     )
 
 
@@ -300,8 +328,9 @@ def qkv_bmm(
         BK=128,
         MP=_MP,
         num_warps=4,
-        num_stages=4,
-        launch_pdl=True,
+        # Three stages measured 2-4% faster on an RTX 3080 (sm86).
+        num_stages=3 if _sm86_or_sm89() else 4,
+        launch_pdl=use_pdl(),
     )
     return out
 
@@ -335,7 +364,23 @@ def sm12x_bf16_ll_gemm(
 def use_sm12x_bf16_ll_gemm(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> bool:
-    """Whether `sm12x_bf16_ll_gemm` serves these operands."""
+    """Whether `sm12x_bf16_ll_gemm` serves these operands on SM12x."""
+    return current_platform.is_device_capability_family(120) and _ll_gemm_operands_ok(
+        x, weight, bias
+    )
+
+
+def use_low_m_projection(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
+) -> bool:
+    """Whether `sm12x_bf16_ll_gemm` serves an attention projection or the LM
+    head with these operands (`use_low_m_projections`)."""
+    return use_low_m_projections() and _ll_gemm_operands_ok(x, weight, bias)
+
+
+def _ll_gemm_operands_ok(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None
+) -> bool:
     if weight.ndim == 2:
         shapes_ok = x.ndim >= 2
         m = x.numel() // max(x.shape[-1], 1)
@@ -358,5 +403,4 @@ def use_sm12x_bf16_ll_gemm(
                 and bias.stride(0) == 1
             )
         )
-        and current_platform.is_device_capability_family(120)
     )
