@@ -92,8 +92,8 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.2"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
-    VLLM_INKLING2_SM8X_LL_GEMM: bool = False
-    VLLM_INKLING2_SM8X_FUSED_ROUTING: bool = False
+    VLLM_INKLING2_SM8X_LL_GEMM: bool | None = None
+    VLLM_INKLING2_SM8X_FUSED_ROUTING: bool | None = None
     VLLM_TRITON_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
@@ -660,16 +660,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
-    # Inkling 2 on SM8x (Ampere, Ada): run the attention projections, the
-    # LM head and the loop blend's controllers at M <= 16 on the low-M
-    # Triton kernels instead of cuBLAS.
-    "VLLM_INKLING2_SM8X_LL_GEMM": lambda: bool(
-        int(os.getenv("VLLM_INKLING2_SM8X_LL_GEMM", "0"))
+    # Inkling 2 decode kernels for SM8x (Ampere, Ada). Unset: on for SM86,
+    # where they were measured, and off for SM80, SM87 and SM89; 1 or 0
+    # turns one on or off on any SM8x GPU. LL_GEMM: the attention
+    # projections, the LM head and the loop blend's controllers at M <= 16
+    # on the low-M Triton kernels instead of cuBLAS. FUSED_ROUTING: the MoE
+    # router GEMM, top-k and expert row alignment in one launch, for up to
+    # 32 tokens.
+    "VLLM_INKLING2_SM8X_LL_GEMM": lambda: maybe_convert_bool(
+        os.getenv("VLLM_INKLING2_SM8X_LL_GEMM")
     ),
-    # Inkling 2 on SM8x: run the MoE router GEMM, top-k and expert row
-    # alignment in one launch for up to 32 tokens.
-    "VLLM_INKLING2_SM8X_FUSED_ROUTING": lambda: bool(
-        int(os.getenv("VLLM_INKLING2_SM8X_FUSED_ROUTING", "0"))
+    "VLLM_INKLING2_SM8X_FUSED_ROUTING": lambda: maybe_convert_bool(
+        os.getenv("VLLM_INKLING2_SM8X_FUSED_ROUTING")
     ),
     "VLLM_REPLICATE_EMBED": lambda: (
         os.getenv("VLLM_REPLICATE_EMBED", "0").strip().lower() in ("1", "true")

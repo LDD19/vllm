@@ -31,14 +31,18 @@ def use_pdl() -> bool:
 
 @functools.cache
 def use_sm8x_kernels(name: str) -> bool:
-    """Whether the SM8x decode kernels `name` run (`_SM8X_KERNELS`; see the
-    `VLLM_INKLING2_SM8X_*` switches in `vllm/envs.py`)."""
+    """Whether the SM8x decode kernels `name` run (`_SM8X_KERNELS`): by
+    default on SM86 only, where they were measured; the
+    `VLLM_INKLING2_SM8X_*` switches in `vllm/envs.py` override that."""
     import vllm.envs as envs
     from vllm.platforms import current_platform
 
     if not current_platform.is_device_capability_family(80):
         return False
-    return bool(getattr(envs, _SM8X_KERNELS[name]))
+    enabled = getattr(envs, _SM8X_KERNELS[name])
+    if enabled is None:
+        return current_platform.is_device_capability(86)
+    return enabled
 
 
 @functools.cache
